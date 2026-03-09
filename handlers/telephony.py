@@ -1,0 +1,621 @@
+import html
+from io import BytesIO
+
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+
+from core.config import ADMIN_IDS
+from core.database import get_coperato_stats, search_coperato_recordings, debug_coperato_db
+from core.integrations.didpbx import search_recordings, download_recording, get_stats
+from core.integrations.voiso import (
+    get_stats as get_voiso_stats, voiso_raw,
+    VOISO_CLUSTER, VOISO_API_KEY,
+    search_voiso_recordings, download_voiso_recording, debug_recording_urls,
+)
+from core.utils import transcribe_voice
+
+# ──────────────────────────────────────────────
+# Keyboards & labels
+# ──────────────────────────────────────────────
+
+STATS_KEYBOARD = InlineKeyboardMarkup([[
+    InlineKeyboardButton("Сьогодні", callback_data="stats:today"),
+    InlineKeyboardButton("Вчора",    callback_data="stats:yesterday"),
+    InlineKeyboardButton("Тиждень",  callback_data="stats:week"),
+    InlineKeyboardButton("Місяць",   callback_data="stats:month"),
+]])
+
+VSTATS_KEYBOARD = InlineKeyboardMarkup([[
+    InlineKeyboardButton("Сьогодні", callback_data="vstats:today"),
+    InlineKeyboardButton("Вчора",    callback_data="vstats:yesterday"),
+    InlineKeyboardButton("Тиждень",  callback_data="vstats:week"),
+    InlineKeyboardButton("Місяць",   callback_data="vstats:month"),
+]])
+
+CSTATS_KEYBOARD = InlineKeyboardMarkup([[
+    InlineKeyboardButton("Сьогодні", callback_data="cstats:today"),
+    InlineKeyboardButton("Вчора",    callback_data="cstats:yesterday"),
+    InlineKeyboardButton("Тиждень",  callback_data="cstats:week"),
+    InlineKeyboardButton("Місяць",   callback_data="cstats:month"),
+]])
+
+STATUS_LABELS = {
+    "ANSWER":     ("✅", "Відповіли"),
+    "CANCEL":     ("📵", "Скасовано"),
+    "NOANSWER":   ("⏱", "Не відповіли"),
+    "BUSY":       ("🔒", "Зайнято"),
+    "CONGESTION": ("❌", "Перевантаження"),
+}
+
+VOISO_STATUS_LABELS = {
+    "answered":         ("✅", "Відповіли"),
+    "missed":           ("📵", "Пропущено"),
+    "no_answer":        ("⏱", "Не відповіли"),
+    "busy":             ("🔒", "Зайнято"),
+    "abandoned":        ("🚶", "Покинуто"),
+    "dialer_abandoned": ("📵", "Дайлер скасовано"),
+    "machine_answered": ("🤖", "Автовідповідь"),
+    "failed":           ("❌", "Помилка"),
+    "rejected":         ("🚫", "Відхилено"),
+    "system_abandoned": ("💨", "Системно скасовано"),
+    "system_reject":    ("🚫", "Системний відмов"),
+    "answered_by_vm":   ("📨", "Голосова пошта"),
+}
+
+PERIOD_LABELS = {
+    "today":     "сьогодні",
+    "yesterday": "вчора",
+    "week":      "поточний тиждень",
+    "month":     "поточний місяць",
+}
+
+PERIOD_ALIAS = {
+    "сьогодні": "today", "сегодня": "today", "день": "today", "today": "today",
+    "вчора": "yesterday", "вчера": "yesterday", "yesterday": "yesterday",
+    "тиждень": "week", "неделя": "week", "week": "week",
+    "місяць": "month", "месяц": "month", "month": "month",
+}
+
+# ──────────────────────────────────────────────
+# Formatting helpers
+# ──────────────────────────────────────────────
+
+def _fmt_dur(secs: int) -> str:
+    m, s = divmod(secs, 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def _format_stats(stats: dict, period_label: str) -> str:
+    total = stats["total"]
+    by_status = stats["by_status"]
+    by_duration = stats.get("by_duration", {})
+
+    pct = lambda n: f"{round(n / total * 100)}%" if total > 0 else "0%"
+
+    lines = [f"📊 <b>Статистика — {period_label}:</b>\n", f"📞 Всього дзвінків: <b>{total}</b>\n"]
+
+    for key in ("ANSWER", "CANCEL", "NOANSWER", "BUSY", "CONGESTION"):
+        count = by_status.get(key, 0)
+        if count or key == "ANSWER":
+            icon, label = STATUS_LABELS[key]
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"{icon} {label}: {count} ({pct(count)}){dur_str}")
+
+    known = set(STATUS_LABELS.keys())
+    for key, count in by_status.items():
+        if key not in known and count:
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"❓ {key}: {count} ({pct(count)}){dur_str}")
+
+    return "\n".join(lines)
+
+
+def _format_voiso_stats(stats: dict, period_label: str) -> str:
+    total = stats["total"]
+    by_status = stats["by_status"]
+    by_duration = stats.get("by_duration", {})
+
+    pct = lambda n: f"{round(n / total * 100)}%" if total > 0 else "0%"
+
+    lines = [f"📊 <b>Voiso — {period_label}:</b>\n", f"📞 Всього дзвінків: <b>{total}</b>\n"]
+
+    for key in ("answered", "missed", "no_answer", "busy", "abandoned",
+                "dialer_abandoned", "machine_answered", "failed", "rejected",
+                "system_abandoned", "system_reject", "answered_by_vm"):
+        count = by_status.get(key, 0)
+        if count or key == "answered":
+            icon, label = VOISO_STATUS_LABELS[key]
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"{icon} {label}: {count} ({pct(count)}){dur_str}")
+
+    known = set(VOISO_STATUS_LABELS.keys())
+    for key, count in by_status.items():
+        if key not in known and count:
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"❓ {key}: {count} ({pct(count)}){dur_str}")
+
+    return "\n".join(lines)
+
+
+def _format_cstats(stats: dict, period_label: str) -> str:
+    total = stats["total"]
+    by_status = stats["by_status"]
+    by_duration = stats.get("by_duration", {})
+    by_type = stats.get("by_type", {})
+
+    pct = lambda n: f"{round(n / total * 100)}%" if total > 0 else "0%"
+
+    incoming = by_type.get("incoming", 0)
+    outgoing = by_type.get("outgoing", 0)
+    answered = by_status.get("answered", 0)
+    missed = by_status.get("missed", 0)
+    ans_dur = by_duration.get("answered", 0)
+
+    lines = [
+        f"📊 <b>Coperato — {period_label}:</b>\n",
+        f"📞 Всього дзвінків: <b>{total}</b>",
+        f"📥 Вхідні: {incoming}  📤 Вихідні: {outgoing}\n",
+        f"✅ Відповіли: {answered} ({pct(answered)})" + (f" — {_fmt_dur(ans_dur)}" if ans_dur else ""),
+        f"📵 Пропущено: {missed} ({pct(missed)})",
+    ]
+
+    known = {"answered", "missed"}
+    for key, count in by_status.items():
+        if key not in known and count:
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"❓ {key}: {count} ({pct(count)}){dur_str}")
+
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────
+# Stats commands
+# ──────────────────────────────────────────────
+
+async def stats_command(update: Update, context):
+    """/stats [today|yesterday|week|month]"""
+    arg = context.args[0] if context.args else "today"
+    period = PERIOD_ALIAS.get(arg, "today")
+    status_msg = await update.effective_message.reply_text("📊 Збираю статистику...")
+    try:
+        stats = await get_stats(period)
+    except Exception as e:
+        print(f"[ERROR] get_stats error={e}")
+        await status_msg.edit_text("😔 Щось пішло не так, спробуй ще раз")
+        return
+    await status_msg.edit_text(_format_stats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=STATS_KEYBOARD)
+
+
+async def vstats_command(update: Update, context):
+    """/vstats [today|yesterday|week|month] — Voiso статистика"""
+    arg = context.args[0] if context.args else "today"
+    period = PERIOD_ALIAS.get(arg, "today")
+    status_msg = await update.effective_message.reply_text("📊 Збираю статистику Voiso...")
+    try:
+        stats = await get_voiso_stats(period)
+    except Exception as e:
+        print(f"[ERROR] get_voiso_stats error={e}")
+        await status_msg.edit_text(f"😔 Помилка: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        return
+    await status_msg.edit_text(_format_voiso_stats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=VSTATS_KEYBOARD)
+
+
+async def cstats_command(update: Update, context):
+    """/cstats [today|yesterday|week|month] — Coperato статистика"""
+    arg = context.args[0] if context.args else "today"
+    period = PERIOD_ALIAS.get(arg, "today")
+    status_msg = await update.effective_message.reply_text("📊 Збираю статистику Coperato...")
+    try:
+        stats = get_coperato_stats(period)
+    except Exception as e:
+        print(f"[ERROR] get_coperato_stats error={e}")
+        await status_msg.edit_text(f"😔 Помилка: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        return
+    await status_msg.edit_text(_format_cstats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=CSTATS_KEYBOARD)
+
+
+async def handle_stats_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("stats:"):
+        period = query.data.split(":", 1)[1]
+        try:
+            stats = await get_stats(period)
+        except Exception as e:
+            print(f"[ERROR] get_stats callback error={e}")
+            await query.edit_message_text("😔 Щось пішло не так")
+            return
+        await query.edit_message_text(_format_stats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=STATS_KEYBOARD)
+
+    elif query.data.startswith("cstats:"):
+        period = query.data.split(":", 1)[1]
+        try:
+            stats = get_coperato_stats(period)
+        except Exception as e:
+            print(f"[ERROR] get_coperato_stats callback error={e}")
+            await query.edit_message_text("😔 Щось пішло не так")
+            return
+        await query.edit_message_text(_format_cstats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=CSTATS_KEYBOARD)
+
+    elif query.data.startswith("vstats:"):
+        period = query.data.split(":", 1)[1]
+        try:
+            stats = await get_voiso_stats(period)
+        except Exception as e:
+            print(f"[ERROR] get_voiso_stats callback error={e}")
+            await query.edit_message_text("😔 Щось пішло не так")
+            return
+        await query.edit_message_text(_format_voiso_stats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=VSTATS_KEYBOARD)
+
+    elif query.data.startswith("dl_rec:"):
+        recording = query.data.split(":", 1)[1]
+        await query.answer("⬇️ Завантажую запис...")
+        try:
+            audio_bytes = await download_recording(recording)
+            print(f"[DEBUG] recording size={len(audio_bytes)} first_bytes={audio_bytes[:8].hex()}")
+            if len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 API повернув {len(audio_bytes)} байт:\n<code>{html.escape(audio_bytes.decode('utf-8', errors='replace'))}</code>",
+                    parse_mode="HTML",
+                )
+                return
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=BytesIO(audio_bytes),
+                filename="recording.mp3",
+                caption="🎙️ Запис дзвінка",
+            )
+        except Exception as e:
+            print(f"[ERROR] download recording={e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"😔 Помилка завантаження: <code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
+            )
+
+    elif query.data.startswith("tr_rec:"):
+        recording = query.data.split(":", 1)[1]
+        await query.answer("📝 Транскрибую...")
+        try:
+            audio_bytes = await download_recording(recording)
+            tmp_path = f"/tmp/rec_{query.from_user.id}.mp3"
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
+            text, lang = await transcribe_voice(tmp_path)
+            context.user_data["last_transcript"] = text
+            context.user_data["last_transcript_lang"] = lang
+            LANG_FLAG = {"uk": "🇺🇦", "ru": "🇷🇺", "en": "🇬🇧", "de": "🇩🇪", "pl": "🇵🇱"}
+            flag = LANG_FLAG.get(lang, "🌐")
+            lang_names = {"uk": "українська", "ru": "русский", "en": "english", "de": "deutsch", "pl": "polski"}
+            lang_name = lang_names.get(lang, lang)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"📝 <b>Транскрипція:</b> {flag} <i>{lang_name}</i>\n\n"
+                    f"{html.escape(text)}\n\n"
+                    f"<i>Напиши «переклади на англійську», «проаналізуй розмову» або будь-що інше</i>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[ERROR] transcription={e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
+
+    elif query.data.startswith("vdl_rec:"):
+        uuid = query.data.split(":", 1)[1]
+        await query.answer("⬇️ Завантажую запис Voiso...")
+        try:
+            status_code, audio_bytes = await download_voiso_recording(uuid)
+            is_html = audio_bytes[:20].lstrip().lower().startswith(b"<!doctype") or audio_bytes[:10].lstrip().lower().startswith(b"<html")
+            print(f"[DEBUG] voiso recording uuid={uuid} status={status_code} size={len(audio_bytes)} is_html={is_html}")
+            if status_code != 200 or len(audio_bytes) < 100 or is_html:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 Voiso API повернув HTTP {status_code} ({len(audio_bytes)} байт):\n<code>{html.escape(audio_bytes[:300].decode('utf-8', errors='replace'))}</code>",
+                    parse_mode="HTML",
+                )
+                return
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=BytesIO(audio_bytes),
+                filename="voiso_recording.mp3",
+                caption="🎙️ Запис дзвінка (Voiso)",
+            )
+        except Exception as e:
+            print(f"[ERROR] voiso download recording={e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"😔 Помилка завантаження: <code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
+            )
+
+    elif query.data.startswith("vtr_rec:"):
+        uuid = query.data.split(":", 1)[1]
+        await query.answer("📝 Транскрибую Voiso запис...")
+        try:
+            status_code, audio_bytes = await download_voiso_recording(uuid)
+            if status_code != 200 or len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 Voiso API повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                )
+                return
+            tmp_path = f"/tmp/vrec_{query.from_user.id}.mp3"
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
+            text, lang = await transcribe_voice(tmp_path)
+            context.user_data["last_transcript"] = text
+            context.user_data["last_transcript_lang"] = lang
+            LANG_FLAG = {"uk": "🇺🇦", "ru": "🇷🇺", "en": "🇬🇧", "de": "🇩🇪", "pl": "🇵🇱"}
+            flag = LANG_FLAG.get(lang, "🌐")
+            lang_names = {"uk": "українська", "ru": "русский", "en": "english", "de": "deutsch", "pl": "polski"}
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"📝 <b>Транскрипція Voiso:</b> {flag} <i>{lang_names.get(lang, lang)}</i>\n\n"
+                    f"{html.escape(text)}\n\n"
+                    f"<i>Напиши «переклади на англійську», «проаналізуй розмову» або будь-що інше</i>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[ERROR] voiso transcription={e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
+
+
+# ──────────────────────────────────────────────
+# Recording search commands
+# ──────────────────────────────────────────────
+
+async def record_command(update: Update, context):
+    """/record +380501234567 [days]"""
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /record +380501234567 [кількість_днів]")
+        return
+    phone = context.args[0]
+    days = int(context.args[1]) if len(context.args) > 1 else 30
+    status_msg = await update.effective_message.reply_text(f"🔍 Шукаю дзвінки для {phone}...")
+    try:
+        recordings = await search_recordings(phone, days)
+    except Exception as e:
+        print(f"[ERROR] search_recordings error={e}")
+        await status_msg.edit_text("😔 Щось пішло не так, спробуй ще раз")
+        return
+    if not recordings:
+        await status_msg.edit_text(f"📭 Записів для {phone} не знайдено за {days} днів.")
+        return
+    text = f"🎙 <b>Знайдено {len(recordings)} записів для {phone}:</b>\n\n"
+    buttons = []
+    for i, rec in enumerate(recordings[:10]):
+        date = (rec.get("MSG_DATE") or "")[:16]
+        duration = int(rec.get("DURATION") or 0)
+        dur_str = f"{duration//60}хв {duration%60}с" if duration >= 60 else f"{duration}с"
+        text += f"🎙 {date} — {dur_str}\n"
+        filename = rec.get("FILE_NAME") or ""
+        if filename:
+            buttons.append([
+                InlineKeyboardButton(f"⬇️ Завантажити #{i+1}", callback_data=f"dl_rec:{filename[:60]}"),
+                InlineKeyboardButton(f"📝 Транскрипція #{i+1}", callback_data=f"tr_rec:{filename[:60]}"),
+            ])
+    if len(recordings) > 10:
+        text += f"\n<i>...та ще {len(recordings)-10} записів</i>"
+    await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+
+async def vrec_command(update: Update, context):
+    """/vrec +380501234567 [days] — пошук записів по номеру у Voiso"""
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /vrec +380501234567 [кількість_днів]")
+        return
+    phone = context.args[0]
+    days = int(context.args[1]) if len(context.args) > 1 else 30
+    status_msg = await update.effective_message.reply_text(f"🔍 Шукаю дзвінки Voiso для {phone}...")
+    try:
+        records = await search_voiso_recordings(phone, days)
+    except Exception as e:
+        print(f"[ERROR] search_voiso_recordings error={e}")
+        await status_msg.edit_text("😔 Щось пішло не так, спробуй ще раз")
+        return
+    if not records:
+        await status_msg.edit_text(f"📭 Дзвінків для {phone} не знайдено у Voiso за {days} днів.")
+        return
+    text = f"🎙 <b>Знайдено {len(records)} дзвінків Voiso для {phone}:</b>\n\n"
+    buttons = []
+    for i, rec in enumerate(records[:10]):
+        ts = (rec.get("timestamp") or "")[:16].replace("T", " ")
+        dur = rec.get("duration") or "—"
+        disp = rec.get("disposition") or "—"
+        agent = rec.get("agent") or "—"
+        uuid = rec.get("uuid") or ""
+        disp_icon = {"answered": "✅", "no_answer": "⏱", "missed": "📵", "busy": "🔴"}.get(disp, "❓")
+        text += f"{disp_icon} {ts} | {dur} | {agent}\n📞 {rec.get('from','—')} → {rec.get('to','—')}\n\n"
+        if uuid and disp == "answered":
+            buttons.append([
+                InlineKeyboardButton(f"⬇️ Завантажити #{i+1}", callback_data=f"vdl_rec:{uuid[:60]}"),
+                InlineKeyboardButton(f"📝 Транскрипція #{i+1}", callback_data=f"vtr_rec:{uuid[:60]}"),
+            ])
+    if len(records) > 10:
+        text += f"<i>...та ще {len(records)-10} дзвінків</i>"
+    await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+
+async def crec_command(update: Update, context):
+    """/crec +380501234567 [days] — пошук записів Coperato по номеру"""
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /crec +380501234567 [кількість_днів]")
+        return
+    phone = context.args[0]
+    days = int(context.args[1]) if len(context.args) > 1 else 30
+    status_msg = await update.effective_message.reply_text(f"🔍 Шукаю записи Coperato для {phone}...")
+    records = search_coperato_recordings(phone, days)
+    if not records:
+        await status_msg.edit_text(f"📭 Записів Coperato для {phone} не знайдено за {days} днів.")
+        return
+    text = f"🎙 <b>Знайдено {len(records)} записів Coperato для {phone}:</b>\n\n"
+    buttons = []
+    for i, rec in enumerate(records[:10]):
+        date = str(rec.get("call_date") or "")[:16]
+        dur = int(rec.get("duration") or 0)
+        dur_str = f"{dur//60}хв {dur%60}с" if dur >= 60 else f"{dur}с"
+        rec_url = rec.get("recording_file") or ""
+        text += f"📞 {date} | {dur_str}\n{rec.get('caller_id','—')} → {rec.get('called_id','—')}\n\n"
+        if rec_url:
+            buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=rec_url)])
+    if len(records) > 10:
+        text += f"<i>...та ще {len(records)-10} записів</i>"
+    await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+
+# ──────────────────────────────────────────────
+# Debug commands (admin only)
+# ──────────────────────────────────────────────
+
+async def debug_pbx_command(update: Update, context):
+    """/debug_pbx — сирий JSON від API (тільки адмін)"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    from core.integrations.didpbx import DIDPBX_URL, DIDPBX_PHONE, DIDPBX_PASSWORD
+    from datetime import datetime, timedelta
+    import aiohttp as _aio
+
+    await update.effective_message.reply_text(
+        f"🔧 <b>Config:</b>\n"
+        f"URL: <code>{DIDPBX_URL}</code>\n"
+        f"PHONE: <code>{DIDPBX_PHONE or '❌ EMPTY'}</code>\n"
+        f"PASSWORD: <code>{'✅ встановлено' if DIDPBX_PASSWORD else '❌ EMPTY'}</code>",
+        parse_mode="HTML",
+    )
+
+    to_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    from_time = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    phone_variants = [DIDPBX_PHONE]
+    if DIDPBX_PHONE and "/" in DIDPBX_PHONE:
+        phone_variants.append(DIDPBX_PHONE.split("/", 1)[1])
+
+    for ph in phone_variants:
+        label_suffix = f"(phone=<code>{html.escape(ph)}</code>)"
+        try:
+            async with _aio.ClientSession() as sess:
+                async with sess.get(DIDPBX_URL, params={
+                    "phone": ph, "pw": DIDPBX_PASSWORD,
+                    "action": "vb_list", "df": "json",
+                }, headers={"Accept-Encoding": "identity"}) as resp:
+                    raw = await resp.read()
+            preview = html.escape(raw[:600].decode("utf-8", errors="replace")) if raw else "(порожньо)"
+            await update.effective_message.reply_text(
+                f"🔑 <b>vb_list</b> {label_suffix} HTTP {resp.status} ({len(raw)} байт)\n<pre>{preview}</pre>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await update.effective_message.reply_text(f"❌ vb_list {label_suffix}: {html.escape(str(e))}", parse_mode="HTML")
+
+        try:
+            import json as _json
+            async with _aio.ClientSession() as sess:
+                async with sess.get(DIDPBX_URL, params={
+                    "phone": ph, "pw": DIDPBX_PASSWORD,
+                    "action": "cdr_list", "from_time": from_time, "to_time": to_time, "df": "json",
+                }, headers={"Accept-Encoding": "identity"}) as resp:
+                    raw = await resp.read()
+            preview = html.escape(raw[:600].decode("utf-8", errors="replace")) if raw else "(порожньо)"
+            await update.effective_message.reply_text(
+                f"📋 <b>cdr_list</b> {label_suffix} HTTP {resp.status} ({len(raw)} байт)\n<pre>{preview}</pre>",
+                parse_mode="HTML",
+            )
+            try:
+                async with _aio.ClientSession() as sess:
+                    async with sess.get(DIDPBX_URL, params={
+                        "phone": ph, "pw": DIDPBX_PASSWORD,
+                        "action": "msg_list", "from_time": from_time, "to_time": to_time, "df": "json",
+                    }, headers={"Accept-Encoding": "identity"}) as resp3:
+                        raw3 = await resp3.read()
+                preview3 = html.escape(raw3[:800].decode("utf-8", errors="replace")) if raw3 else "(порожньо)"
+                await update.effective_message.reply_text(
+                    f"🎙 <b>msg_list</b> HTTP {resp3.status} ({len(raw3)} байт)\n<pre>{preview3}</pre>",
+                    parse_mode="HTML",
+                )
+            except Exception as ex:
+                await update.effective_message.reply_text(f"❌ msg_list: {html.escape(str(ex))}", parse_mode="HTML")
+        except Exception as e:
+            await update.effective_message.reply_text(f"❌ cdr_list {label_suffix}: {html.escape(str(e))}", parse_mode="HTML")
+
+
+async def debug_voiso_command(update: Update, context):
+    """/debug_voiso — сирий response від Voiso CDR API"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    key_preview = (VOISO_API_KEY or "")[:8] + "..." if VOISO_API_KEY else "❌ EMPTY"
+    await update.effective_message.reply_text(
+        f"🔧 <b>Voiso config:</b>\n"
+        f"Cluster: <code>{VOISO_CLUSTER or '❌ EMPTY'}</code>\n"
+        f"API key: <code>{key_preview}</code>\n"
+        f"URL: <code>https://{VOISO_CLUSTER}.voiso.com/api/v2/cdr</code>",
+        parse_mode="HTML",
+    )
+    status, text = await voiso_raw({"start_date": today, "end_date": today})
+    preview = html.escape(text[:1200])
+    await update.effective_message.reply_text(
+        f"📋 HTTP {status} ({len(text)} bytes):\n<pre>{preview}</pre>",
+        parse_mode="HTML",
+    )
+
+
+async def debug_vrec_command(update: Update, context):
+    """/debug_vrec <uuid> — пробує всі URL варіанти для Voiso запису"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /debug_vrec <uuid>")
+        return
+    uuid = context.args[0]
+    await update.effective_message.reply_text(f"🔍 Тестую URL для UUID: <code>{uuid}</code>...", parse_mode="HTML")
+    results = await debug_recording_urls(uuid)
+    lines = []
+    for r in results:
+        if "error" in r:
+            lines.append(f"❌ {html.escape(r['url'])}\n   error: {html.escape(r['error'])}")
+        else:
+            lines.append(
+                f"HTTP {r['status']} | {r['size']}b | {html.escape(r['content_type'])}\n"
+                f"   <code>{html.escape(r['url'])}</code>\n"
+                f"   <i>{html.escape(r['preview'])}</i>"
+            )
+    await update.effective_message.reply_text("\n\n".join(lines), parse_mode="HTML")
+
+
+async def debug_coperato_command(update: Update, context):
+    """/debug_coperato — діагностика Coperato записів в БД"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    try:
+        info = debug_coperato_db()
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ DB error: {html.escape(str(e))}", parse_mode="HTML")
+        return
+    lines = [
+        f"<b>Coperato DB діагностика</b>",
+        f"Всього дзвінків: <b>{info['total']}</b>",
+        f"З записом: <b>{info['with_recording']}</b>",
+    ]
+    if info["recent"]:
+        lines.append("\n<b>Останні 5 записів:</b>")
+        for r in info["recent"]:
+            rec = r["recording_file"] or "—"
+            lines.append(
+                f"📞 {html.escape(r['caller_id'] or '?')} → {html.escape(r['called_id'] or '?')}\n"
+                f"   {r['call_date']}\n"
+                f"   <code>{html.escape(rec[:80])}</code>"
+            )
+    else:
+        lines.append("\nЗаписів не знайдено взагалі.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")

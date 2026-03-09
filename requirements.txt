@@ -1,0 +1,9 @@
+python-telegram-bot==20.7
+anthropic
+openai
+fastapi
+uvicorn[standard]
+aiohttp
+fal-client
+psycopg2-binary
+python-dotenv
