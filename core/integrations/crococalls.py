@@ -114,6 +114,12 @@ async def get_stats(period: str = "today") -> dict:
     }
 
 
+async def download_recording(audio_url: str) -> tuple[int, bytes]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(audio_url, headers=_headers()) as resp:
+            return resp.status, await resp.read()
+
+
 async def search_recordings(phone: str, days: int = 30) -> list:
     now = datetime.now()
     from_dt = now - timedelta(days=days)

@@ -15,6 +15,7 @@ from core.integrations.voiso import (
 from core.integrations.crococalls import (
     get_stats as get_croco_stats,
     search_recordings as search_croco_recordings,
+    download_recording as download_croco_recording,
     croco_raw,
     CROCO_BASE_URL,
 )
@@ -395,6 +396,72 @@ async def handle_stats_callback(update: Update, context):
             print(f"[ERROR] voiso transcription={e}")
             await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
 
+    elif query.data.startswith("kdl_rec:"):
+        idx = query.data.split(":", 1)[1]
+        audio_url = context.user_data.get("krec_urls", {}).get(idx)
+        await query.answer("⬇️ Завантажую запис CrocoCalls...")
+        if not audio_url:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 URL запису не знайдено, спробуй /krec знову")
+            return
+        try:
+            status_code, audio_bytes = await download_croco_recording(audio_url)
+            if status_code != 200 or len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 CrocoCalls повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                )
+                return
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=BytesIO(audio_bytes),
+                filename="croco_recording.mp3",
+                caption="🎙️ Запис дзвінка (CrocoCalls)",
+            )
+        except Exception as e:
+            print(f"[ERROR] croco download={e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"😔 Помилка завантаження: <code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
+            )
+
+    elif query.data.startswith("ktr_rec:"):
+        idx = query.data.split(":", 1)[1]
+        audio_url = context.user_data.get("krec_urls", {}).get(idx)
+        await query.answer("📝 Транскрибую CrocoCalls запис...")
+        if not audio_url:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 URL запису не знайдено, спробуй /krec знову")
+            return
+        try:
+            status_code, audio_bytes = await download_croco_recording(audio_url)
+            if status_code != 200 or len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 CrocoCalls повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                )
+                return
+            tmp_path = f"/tmp/krec_{query.from_user.id}.mp3"
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
+            text, lang = await transcribe_voice(tmp_path)
+            context.user_data["last_transcript"] = text
+            context.user_data["last_transcript_lang"] = lang
+            LANG_FLAG = {"uk": "🇺🇦", "ru": "🇷🇺", "en": "🇬🇧", "de": "🇩🇪", "pl": "🇵🇱"}
+            flag = LANG_FLAG.get(lang, "🌐")
+            lang_names = {"uk": "українська", "ru": "русский", "en": "english", "de": "deutsch", "pl": "polski"}
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"📝 <b>Транскрипція CrocoCalls:</b> {flag} <i>{lang_names.get(lang, lang)}</i>\n\n"
+                    f"{html.escape(text)}\n\n"
+                    f"<i>Напиши «переклади на англійську», «проаналізуй розмову» або будь-що інше</i>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[ERROR] croco transcription={e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
+
 
 # ──────────────────────────────────────────────
 # Recording search commands
@@ -737,6 +804,7 @@ async def krec_command(update: Update, context):
         return
     text = f"🎙 <b>Знайдено {len(records)} записів CrocoCalls для {phone}:</b>\n\n"
     buttons = []
+    context.user_data["krec_urls"] = {}
     for i, rec in enumerate(records[:10]):
         date = (rec.get("starttime") or "")[:16]
         dur = int(rec.get("duration_sec") or 0)
@@ -749,7 +817,11 @@ async def krec_command(update: Update, context):
         text += f"{dir_icon} {date} | {dur_str} | {status}\n{caller} → {callee}\n\n"
         audio_url = rec.get("audio_url") or ""
         if audio_url:
-            buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=audio_url)])
+            context.user_data["krec_urls"][str(i)] = audio_url
+            buttons.append([
+                InlineKeyboardButton(f"⬇️ Завантажити #{i+1}", callback_data=f"kdl_rec:{i}"),
+                InlineKeyboardButton(f"📝 Транскрипція #{i+1}", callback_data=f"ktr_rec:{i}"),
+            ])
     if len(records) > 10:
         text += f"<i>...та ще {len(records)-10} записів</i>"
     await status_msg.edit_text(

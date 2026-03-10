@@ -58,7 +58,7 @@ def build_bot_app():
     app.add_handler(CommandHandler("cstats",          cstats_command))
     app.add_handler(CallbackQueryHandler(
         handle_stats_callback,
-        pattern="^(stats:|vstats:|cstats:|kstats:|dl_rec:|tr_rec:|vdl_rec:|vtr_rec:)"
+        pattern="^(stats:|vstats:|cstats:|kstats:|dl_rec:|tr_rec:|vdl_rec:|vtr_rec:|kdl_rec:|ktr_rec:)"
     ))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
     app.add_handler(CallbackQueryHandler(handle_photo_callback, pattern="^photo_"))
