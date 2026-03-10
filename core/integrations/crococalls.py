@@ -130,7 +130,6 @@ async def search_recordings(phone: str, days: int = 30) -> list:
         callee_norm = _norm_phone(callee.get("number") or "")
 
         if needle and (needle in caller_norm or needle in callee_norm):
-            if c.get("audio_url"):
-                result.append(c)
+            result.append(c)
 
     return result
