@@ -1,6 +1,7 @@
 import html
 from io import BytesIO
 
+import aiohttp
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 
 from core.config import ADMIN_IDS, COPERATO_BASE_URL, CROCO_API_KEY
@@ -768,6 +769,14 @@ async def debug_croco_command(update: Update, context):
         f"API key: <code>{key_preview}</code>",
         parse_mode="HTML",
     )
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.ipify.org") as r:
+                server_ip = await r.text()
+        await update.effective_message.reply_text(f"🌐 Зовнішній IP сервера: <code>{html.escape(server_ip)}</code>", parse_mode="HTML")
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ IP check failed: {e}")
+
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%dT00:00:00")
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
