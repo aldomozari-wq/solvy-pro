@@ -5,18 +5,23 @@ from datetime import datetime, timedelta
 CROCO_BASE_URL = "https://api.portal-crococalls.com/v2"
 CROCO_API_KEY = os.getenv("CROCO_API_KEY", "")
 
+def _headers() -> dict:
+    return {
+        "X-API-KEY": CROCO_API_KEY,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
 
 async def croco_request(endpoint: str, params: dict = {}) -> dict:
-    headers = {"X-API-KEY": CROCO_API_KEY}
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{CROCO_BASE_URL}{endpoint}", params=params, headers=headers) as resp:
+        async with session.get(f"{CROCO_BASE_URL}{endpoint}", params=params, headers=_headers()) as resp:
             return await resp.json(content_type=None)
 
 
 async def croco_raw(params: dict = {}) -> tuple[int, str]:
-    headers = {"X-API-KEY": CROCO_API_KEY}
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{CROCO_BASE_URL}/calls", params=params, headers=headers) as resp:
+        async with session.get(f"{CROCO_BASE_URL}/calls", params=params, headers=_headers()) as resp:
             text = await resp.text()
             return resp.status, text
 
