@@ -10,6 +10,8 @@ OPENAI_KEY    = os.getenv("OPENAI_KEY")
 os.environ.setdefault("FAL_KEY", os.getenv("FAL_KEY", ""))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+COPERATO_BASE_URL = os.getenv("COPERATO_BASE_URL", "").rstrip("/")
+CROCO_API_KEY = os.getenv("CROCO_API_KEY", "")
 
 # ── Admin ──────────────────────────────────────────────────────────────────────
 def _parse_ids(env_key: str) -> set[int]:

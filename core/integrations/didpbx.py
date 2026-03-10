@@ -76,8 +76,17 @@ async def _fetch_all_cdr(params: dict, chunk_hours: int = 2) -> list:
         chunk_params["from_time"] = _dt(current)    # YYYY/MM/DD HH:MM:SS
         chunk_params["to_time"] = _dt(chunk_end)    # YYYY/MM/DD HH:MM:SS
 
-        data = await didpbx_request("cdr_list", chunk_params)
-        if isinstance(data, dict):
+        cdr_from = None
+        page_num = 0
+        while True:
+            paged_params = dict(chunk_params)
+            if cdr_from is not None:
+                paged_params["cdr_from"] = cdr_from
+
+            data = await didpbx_request("cdr_list", paged_params)
+            if not isinstance(data, dict):
+                break
+
             page = data.get("CDR_LIST", [])
             new_count = 0
             for call in page:
@@ -86,8 +95,15 @@ async def _fetch_all_cdr(params: dict, chunk_hours: int = 2) -> list:
                     seen_ids.add(uid)
                     all_calls.append(call)
                     new_count += 1
+
+            page_num += 1
             chunk_num += 1
-            print(f"[CDR chunk {chunk_num}] {current.strftime('%m-%d %H:%M')}-{chunk_end.strftime('%H:%M')} got={len(page)} new={new_count} total={len(all_calls)}")
+            print(f"[CDR chunk {chunk_num} p{page_num}] {current.strftime('%m-%d %H:%M')}-{chunk_end.strftime('%H:%M')} got={len(page)} new={new_count} total={len(all_calls)}")
+
+            cdr_next = data.get("CDR_NEXT")
+            if not page or cdr_next is None:
+                break
+            cdr_from = cdr_next
 
         current += timedelta(hours=chunk_hours)
 

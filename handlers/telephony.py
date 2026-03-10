@@ -3,13 +3,19 @@ from io import BytesIO
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 
-from core.config import ADMIN_IDS
+from core.config import ADMIN_IDS, COPERATO_BASE_URL, CROCO_API_KEY
 from core.database import get_coperato_stats, search_coperato_recordings, debug_coperato_db
 from core.integrations.didpbx import search_recordings, download_recording, get_stats
 from core.integrations.voiso import (
     get_stats as get_voiso_stats, voiso_raw,
     VOISO_CLUSTER, VOISO_API_KEY,
     search_voiso_recordings, download_voiso_recording, debug_recording_urls,
+)
+from core.integrations.crococalls import (
+    get_stats as get_croco_stats,
+    search_recordings as search_croco_recordings,
+    croco_raw,
+    CROCO_BASE_URL,
 )
 from core.utils import transcribe_voice
 
@@ -36,6 +42,13 @@ CSTATS_KEYBOARD = InlineKeyboardMarkup([[
     InlineKeyboardButton("Вчора",    callback_data="cstats:yesterday"),
     InlineKeyboardButton("Тиждень",  callback_data="cstats:week"),
     InlineKeyboardButton("Місяць",   callback_data="cstats:month"),
+]])
+
+KSTATS_KEYBOARD = InlineKeyboardMarkup([[
+    InlineKeyboardButton("Сьогодні", callback_data="kstats:today"),
+    InlineKeyboardButton("Вчора",    callback_data="kstats:yesterday"),
+    InlineKeyboardButton("Тиждень",  callback_data="kstats:week"),
+    InlineKeyboardButton("Місяць",   callback_data="kstats:month"),
 ]])
 
 STATUS_LABELS = {
@@ -241,6 +254,19 @@ async def handle_stats_callback(update: Update, context):
             await query.edit_message_text("😔 Щось пішло не так")
             return
         await query.edit_message_text(_format_cstats(stats, PERIOD_LABELS.get(period, period)), parse_mode="HTML", reply_markup=CSTATS_KEYBOARD)
+
+    elif query.data.startswith("kstats:"):
+        period = query.data.split(":", 1)[1]
+        try:
+            stats = await get_croco_stats(period)
+        except Exception as e:
+            await query.edit_message_text("😔 Щось пішло не так")
+            return
+        await query.edit_message_text(
+            _format_croco_stats(stats, PERIOD_LABELS.get(period, period)),
+            parse_mode="HTML",
+            reply_markup=KSTATS_KEYBOARD,
+        )
 
     elif query.data.startswith("vstats:"):
         period = query.data.split(":", 1)[1]
@@ -466,7 +492,10 @@ async def crec_command(update: Update, context):
         rec_url = rec.get("recording_file") or ""
         text += f"📞 {date} | {dur_str}\n{rec.get('caller_id','—')} → {rec.get('called_id','—')}\n\n"
         if rec_url:
-            buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=rec_url)])
+            if rec_url.startswith("/") and COPERATO_BASE_URL:
+                rec_url = COPERATO_BASE_URL + rec_url
+            if rec_url.startswith("http"):
+                buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=rec_url)])
     if len(records) > 10:
         text += f"<i>...та ще {len(records)-10} записів</i>"
     await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
@@ -619,3 +648,132 @@ async def debug_coperato_command(update: Update, context):
     else:
         lines.append("\nЗаписів не знайдено взагалі.")
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ──────────────────────────────────────────────
+# CrocoCalls
+# ──────────────────────────────────────────────
+
+CROCO_STATUS_LABELS = {
+    "answer":      ("✅", "Відповіли"),
+    "busy":        ("🔒", "Зайнято"),
+    "noanswer":    ("⏱", "Не відповіли"),
+    "cancel":      ("📵", "Скасовано"),
+    "congestion":  ("❌", "Перевантаження"),
+    "chanunavail": ("📵", "Недоступний"),
+    "callflow":    ("🔄", "Кинув до з'єднання"),
+    "unknown":     ("❓", "Невідомо"),
+}
+
+
+def _format_croco_stats(stats: dict, period_label: str) -> str:
+    total = stats["total"]
+    by_status = stats["by_status"]
+    by_duration = stats.get("by_duration", {})
+    by_type = stats.get("by_type", {})
+
+    pct = lambda n: f"{round(n / total * 100)}%" if total > 0 else "0%"
+
+    incoming = by_type.get("inbound", 0)
+    outgoing = by_type.get("outbound", 0)
+
+    lines = [
+        f"📊 <b>CrocoCalls — {period_label}:</b>\n",
+        f"📞 Всього дзвінків: <b>{total}</b>",
+        f"📥 Вхідні: {incoming}  📤 Вихідні: {outgoing}\n",
+    ]
+
+    for key in ("answer", "cancel", "noanswer", "busy", "congestion", "chanunavail", "callflow"):
+        count = by_status.get(key, 0)
+        if count or key == "answer":
+            icon, label = CROCO_STATUS_LABELS[key]
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"{icon} {label}: {count} ({pct(count)}){dur_str}")
+
+    known = set(CROCO_STATUS_LABELS.keys())
+    for key, count in by_status.items():
+        if key not in known and count:
+            dur = by_duration.get(key, 0)
+            dur_str = f" — {_fmt_dur(dur)}" if dur > 0 else ""
+            lines.append(f"❓ {key}: {count} ({pct(count)}){dur_str}")
+
+    return "\n".join(lines)
+
+
+async def kstats_command(update: Update, context):
+    """/kstats [today|yesterday|week|month] — CrocoCalls статистика"""
+    arg = context.args[0] if context.args else "today"
+    period = PERIOD_ALIAS.get(arg, "today")
+    status_msg = await update.effective_message.reply_text("📊 Збираю статистику CrocoCalls...")
+    try:
+        stats = await get_croco_stats(period)
+    except Exception as e:
+        await status_msg.edit_text(f"😔 Помилка: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        return
+    await status_msg.edit_text(
+        _format_croco_stats(stats, PERIOD_LABELS.get(period, period)),
+        parse_mode="HTML",
+        reply_markup=KSTATS_KEYBOARD,
+    )
+
+
+async def krec_command(update: Update, context):
+    """/krec +380501234567 [days] — пошук записів CrocoCalls по номеру"""
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /krec +380501234567 [кількість_днів]")
+        return
+    phone = context.args[0]
+    days = int(context.args[1]) if len(context.args) > 1 else 30
+    status_msg = await update.effective_message.reply_text(f"🔍 Шукаю дзвінки CrocoCalls для {phone}...")
+    try:
+        records = await search_croco_recordings(phone, days)
+    except Exception as e:
+        await status_msg.edit_text(f"😔 Помилка: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        return
+    if not records:
+        await status_msg.edit_text(f"📭 Записів CrocoCalls для {phone} не знайдено за {days} днів.")
+        return
+    text = f"🎙 <b>Знайдено {len(records)} записів CrocoCalls для {phone}:</b>\n\n"
+    buttons = []
+    for i, rec in enumerate(records[:10]):
+        date = (rec.get("starttime") or "")[:16]
+        dur = int(rec.get("duration_sec") or 0)
+        dur_str = f"{dur//60}хв {dur%60}с" if dur >= 60 else f"{dur}с"
+        direction = rec.get("direction") or "—"
+        status = rec.get("status") or "—"
+        caller = (rec.get("caller") or {}).get("cid") or (rec.get("caller") or {}).get("number") or "—"
+        callee = (rec.get("callee") or {}).get("number") or "—"
+        dir_icon = "📥" if direction == "inbound" else "📤"
+        text += f"{dir_icon} {date} | {dur_str} | {status}\n{caller} → {callee}\n\n"
+        audio_url = rec.get("audio_url") or ""
+        if audio_url:
+            buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=audio_url)])
+    if len(records) > 10:
+        text += f"<i>...та ще {len(records)-10} записів</i>"
+    await status_msg.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
+
+
+async def debug_croco_command(update: Update, context):
+    """/debug_croco — діагностика CrocoCalls API"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    key_preview = (CROCO_API_KEY or "")[:8] + "..." if CROCO_API_KEY else "❌ EMPTY"
+    await update.effective_message.reply_text(
+        f"🔧 <b>CrocoCalls config:</b>\n"
+        f"Base URL: <code>{CROCO_BASE_URL}</code>\n"
+        f"API key: <code>{key_preview}</code>",
+        parse_mode="HTML",
+    )
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%dT00:00:00")
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    status, text = await croco_raw({"limit": 5, "filter": f"starttime>{today},starttime<{now}"})
+    preview = html.escape(text[:1200])
+    await update.effective_message.reply_text(
+        f"📋 HTTP {status} ({len(text)} bytes):\n<pre>{preview}</pre>",
+        parse_mode="HTML",
+    )

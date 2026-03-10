@@ -15,10 +15,11 @@ from handlers import (
     photo_command, handle_message, handle_voice,
     admin_command, handle_admin_callback,
     block_user_command, unblock_user_command, admin_stats_command,
-    record_command, vrec_command, crec_command,
-    stats_command, vstats_command, cstats_command,
+    record_command, vrec_command, crec_command, krec_command,
+    stats_command, vstats_command, cstats_command, kstats_command,
     handle_stats_callback,
     debug_pbx_command, debug_voiso_command, debug_vrec_command, debug_coperato_command,
+    debug_croco_command,
 )
 from webhook_server import app as webhook_app
 
@@ -49,12 +50,15 @@ def build_bot_app():
     app.add_handler(CommandHandler("debug_voiso",     debug_voiso_command))
     app.add_handler(CommandHandler("debug_vrec",      debug_vrec_command))
     app.add_handler(CommandHandler("debug_coperato",  debug_coperato_command))
+    app.add_handler(CommandHandler("kstats",          kstats_command))
+    app.add_handler(CommandHandler("krec",            krec_command))
+    app.add_handler(CommandHandler("debug_croco",     debug_croco_command))
     app.add_handler(CommandHandler("stats",           stats_command))
     app.add_handler(CommandHandler("vstats",          vstats_command))
     app.add_handler(CommandHandler("cstats",          cstats_command))
     app.add_handler(CallbackQueryHandler(
         handle_stats_callback,
-        pattern="^(stats:|vstats:|cstats:|dl_rec:|tr_rec:|vdl_rec:|vtr_rec:)"
+        pattern="^(stats:|vstats:|cstats:|kstats:|dl_rec:|tr_rec:|vdl_rec:|vtr_rec:)"
     ))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
     app.add_handler(CallbackQueryHandler(handle_photo_callback, pattern="^photo_"))
