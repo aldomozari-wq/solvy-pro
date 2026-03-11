@@ -1,3 +1,4 @@
+import asyncio
 import html
 from io import BytesIO
 
@@ -19,6 +20,7 @@ from core.integrations.crococalls import (
     croco_raw,
     CROCO_BASE_URL,
 )
+from core.integrations.coperato import download_recording as download_coperato_recording
 from core.utils import transcribe_voice
 
 # ──────────────────────────────────────────────
@@ -462,6 +464,72 @@ async def handle_stats_callback(update: Update, context):
             print(f"[ERROR] croco transcription={e}")
             await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
 
+    elif query.data.startswith("cdl_rec:"):
+        idx = query.data.split(":", 1)[1]
+        audio_url = context.user_data.get("crec_urls", {}).get(idx)
+        await query.answer("⬇️ Завантажую запис Coperato...")
+        if not audio_url:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 URL запису не знайдено, спробуй /crec знову")
+            return
+        try:
+            status_code, audio_bytes = await download_coperato_recording(audio_url)
+            if status_code != 200 or len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 Coperato повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                )
+                return
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=BytesIO(audio_bytes),
+                filename="coperato_recording.wav",
+                caption="🎙️ Запис дзвінка (Coperato)",
+            )
+        except Exception as e:
+            print(f"[ERROR] coperato download={e}")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"😔 Помилка завантаження: <code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
+            )
+
+    elif query.data.startswith("ctr_rec:"):
+        idx = query.data.split(":", 1)[1]
+        audio_url = context.user_data.get("crec_urls", {}).get(idx)
+        await query.answer("📝 Транскрибую Coperato запис...")
+        if not audio_url:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 URL запису не знайдено, спробуй /crec знову")
+            return
+        try:
+            status_code, audio_bytes = await download_coperato_recording(audio_url)
+            if status_code != 200 or len(audio_bytes) < 100:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"😔 Coperato повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                )
+                return
+            tmp_path = f"/tmp/crec_{query.from_user.id}.wav"
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
+            text, lang = await transcribe_voice(tmp_path)
+            context.user_data["last_transcript"] = text
+            context.user_data["last_transcript_lang"] = lang
+            LANG_FLAG = {"uk": "🇺🇦", "ru": "🇷🇺", "en": "🇬🇧", "de": "🇩🇪", "pl": "🇵🇱"}
+            flag = LANG_FLAG.get(lang, "🌐")
+            lang_names = {"uk": "українська", "ru": "русский", "en": "english", "de": "deutsch", "pl": "polski"}
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"📝 <b>Транскрипція Coperato:</b> {flag} <i>{lang_names.get(lang, lang)}</i>\n\n"
+                    f"{html.escape(text)}\n\n"
+                    f"<i>Напиши «переклади на англійську», «проаналізуй розмову» або будь-що інше</i>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[ERROR] coperato transcription={e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="😔 Не вдалося транскрибувати")
+
 
 # ──────────────────────────────────────────────
 # Recording search commands
@@ -553,6 +621,7 @@ async def crec_command(update: Update, context):
         return
     text = f"🎙 <b>Знайдено {len(records)} записів Coperato для {phone}:</b>\n\n"
     buttons = []
+    context.user_data["crec_urls"] = {}
     for i, rec in enumerate(records[:10]):
         date = str(rec.get("call_date") or "")[:16]
         dur = int(rec.get("duration") or 0)
@@ -563,7 +632,11 @@ async def crec_command(update: Update, context):
             if rec_url.startswith("/") and COPERATO_BASE_URL:
                 rec_url = COPERATO_BASE_URL + rec_url
             if rec_url.startswith("http"):
-                buttons.append([InlineKeyboardButton(f"▶️ Запис #{i+1}", url=rec_url)])
+                context.user_data["crec_urls"][str(i)] = rec_url
+                buttons.append([
+                    InlineKeyboardButton(f"⬇️ Завантажити #{i+1}", callback_data=f"cdl_rec:{i}"),
+                    InlineKeyboardButton(f"📝 Транскрипція #{i+1}", callback_data=f"ctr_rec:{i}"),
+                ])
     if len(records) > 10:
         text += f"<i>...та ще {len(records)-10} записів</i>"
     await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
@@ -858,3 +931,190 @@ async def debug_croco_command(update: Update, context):
         f"📋 HTTP {status} ({len(text)} bytes):\n<pre>{preview}</pre>",
         parse_mode="HTML",
     )
+
+
+# ──────────────────────────────────────────────
+# Bulk recording search
+# ──────────────────────────────────────────────
+
+async def _search_all_for_phone(phone: str, days: int = 90) -> dict:
+    """Шукає записи по всіх телефоніях для одного номера."""
+    loop = asyncio.get_running_loop()
+
+    didpbx_task = asyncio.create_task(_safe(search_recordings(phone, days)))
+    voiso_task  = asyncio.create_task(_safe(search_voiso_recordings(phone, days)))
+    croco_task  = asyncio.create_task(_safe(search_croco_recordings(phone, days)))
+    coperato    = await loop.run_in_executor(None, lambda: _safe_sync(search_coperato_recordings, phone, days))
+
+    didpbx = await didpbx_task
+    voiso  = await voiso_task
+    croco  = await croco_task
+
+    return {"didpbx": didpbx, "voiso": voiso, "croco": croco, "coperato": coperato}
+
+
+async def _safe(coro):
+    try:
+        return await coro
+    except Exception as e:
+        print(f"[bulk] search error: {e}")
+        return []
+
+
+def _safe_sync(fn, *args):
+    try:
+        return fn(*args)
+    except Exception as e:
+        print(f"[bulk] sync search error: {e}")
+        return []
+
+
+async def handle_bulk_recs(query, context):
+    phones = context.user_data.get("bulk_phones", [])
+    if not phones:
+        await query.edit_message_text("😔 Список номерів не знайдено, надішли знову")
+        return
+
+    await query.edit_message_text(f"🔍 Шукаю записи для {len(phones)} номерів у всіх телефоніях...")
+
+    bulk_urls = {}
+    no_results = []
+
+    for pi, phone in enumerate(phones):
+        results = await _search_all_for_phone(phone)
+        didpbx_recs  = results["didpbx"]
+        voiso_recs   = results["voiso"]
+        croco_recs   = results["croco"]
+        coperato_recs = results["coperato"]
+
+        total = len(didpbx_recs) + len(voiso_recs) + len(croco_recs) + len(coperato_recs)
+        if total == 0:
+            no_results.append(phone)
+            continue
+
+        text = f"📞 <b>{html.escape(phone)}</b>\n"
+        text += f"• DIDPBX: {len(didpbx_recs)} зап.\n" if didpbx_recs else "• DIDPBX: немає\n"
+        text += f"• Voiso: {len(voiso_recs)} зап.\n"   if voiso_recs  else "• Voiso: немає\n"
+        text += f"• Coperato: {len(coperato_recs)} зап.\n" if coperato_recs else "• Coperato: немає\n"
+        text += f"• CrocoCalls: {len(croco_recs)} зап.\n"  if croco_recs  else "• CrocoCalls: немає\n"
+
+        buttons = []
+        bulk_urls[pi] = {}
+        btn_count = 0
+
+        # DIDPBX buttons
+        bulk_urls[pi]["didpbx"] = {}
+        for i, rec in enumerate(didpbx_recs[:3]):
+            fname = rec.get("FILE_NAME") or ""
+            if fname and btn_count < 5:
+                bulk_urls[pi]["didpbx"][str(i)] = fname
+                dur = int(rec.get("DURATION") or 0)
+                dur_str = f"{dur//60}:{dur%60:02d}"
+                buttons.append([InlineKeyboardButton(f"⬇️ DIDPBX #{i+1} ({dur_str})", callback_data=f"bdl:{pi}:didpbx:{i}")])
+                btn_count += 1
+
+        # Voiso buttons
+        bulk_urls[pi]["voiso"] = {}
+        for i, rec in enumerate(voiso_recs[:3]):
+            uuid = rec.get("uuid") or ""
+            disp = rec.get("disposition") or ""
+            if uuid and disp == "answered" and btn_count < 5:
+                bulk_urls[pi]["voiso"][str(i)] = uuid
+                dur = rec.get("duration") or "—"
+                buttons.append([InlineKeyboardButton(f"⬇️ Voiso #{i+1} ({dur})", callback_data=f"bdl:{pi}:voiso:{i}")])
+                btn_count += 1
+
+        # Coperato buttons
+        bulk_urls[pi]["coperato"] = {}
+        for i, rec in enumerate(coperato_recs[:3]):
+            rec_url = rec.get("recording_file") or ""
+            if rec_url and btn_count < 5:
+                if rec_url.startswith("/") and COPERATO_BASE_URL:
+                    rec_url = COPERATO_BASE_URL + rec_url
+                if rec_url.startswith("http"):
+                    bulk_urls[pi]["coperato"][str(i)] = rec_url
+                    dur = int(rec.get("duration") or 0)
+                    dur_str = f"{dur//60}:{dur%60:02d}"
+                    buttons.append([InlineKeyboardButton(f"⬇️ Coperato #{i+1} ({dur_str})", callback_data=f"bdl:{pi}:coperato:{i}")])
+                    btn_count += 1
+
+        # CrocoCalls buttons
+        bulk_urls[pi]["croco"] = {}
+        for i, rec in enumerate(croco_recs[:3]):
+            audio_url = rec.get("audio_url") or ""
+            if audio_url and btn_count < 5:
+                bulk_urls[pi]["croco"][str(i)] = audio_url
+                dur = int(rec.get("duration_sec") or 0)
+                dur_str = f"{dur//60}:{dur%60:02d}"
+                buttons.append([InlineKeyboardButton(f"⬇️ CrocoCalls #{i+1} ({dur_str})", callback_data=f"bdl:{pi}:croco:{i}")])
+                btn_count += 1
+
+        await query.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        )
+
+    context.user_data["bulk_urls"] = bulk_urls
+
+    if no_results:
+        no_list = "\n".join(f"• {p}" for p in no_results)
+        await query.message.reply_text(f"📭 <b>Без записів:</b>\n{no_list}", parse_mode="HTML")
+
+
+async def handle_bulk_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("bulk_recs:"):
+        await handle_bulk_recs(query, context)
+        return
+
+    if query.data.startswith("bdl:"):
+        # bdl:{phone_idx}:{source}:{rec_idx}
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return
+        _, pi, source, ri = parts
+        bulk_urls = context.user_data.get("bulk_urls", {})
+        url_or_id = bulk_urls.get(int(pi), {}).get(source, {}).get(ri)
+        if not url_or_id:
+            await query.message.reply_text("😔 Запис не знайдено, спробуй /bulk знову")
+            return
+
+        await query.answer("⬇️ Завантажую...")
+        try:
+            if source == "didpbx":
+                audio_bytes = await download_recording(url_or_id)
+                fname = "didpbx_rec.mp3"
+            elif source == "voiso":
+                status_code, audio_bytes = await download_voiso_recording(url_or_id)
+                if status_code != 200 or len(audio_bytes) < 100:
+                    await query.message.reply_text(f"😔 Voiso HTTP {status_code}")
+                    return
+                fname = "voiso_rec.mp3"
+            elif source == "coperato":
+                status_code, audio_bytes = await download_coperato_recording(url_or_id)
+                if status_code != 200 or len(audio_bytes) < 100:
+                    await query.message.reply_text(f"😔 Coperato HTTP {status_code}")
+                    return
+                fname = "coperato_rec.wav"
+            elif source == "croco":
+                status_code, audio_bytes = await download_croco_recording(url_or_id)
+                if status_code != 200 or len(audio_bytes) < 100:
+                    await query.message.reply_text(f"😔 CrocoCalls HTTP {status_code}")
+                    return
+                fname = "croco_rec.mp3"
+            else:
+                return
+
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=BytesIO(audio_bytes),
+                filename=fname,
+            )
+        except Exception as e:
+            print(f"[ERROR] bulk download source={source} err={e}")
+            await query.message.reply_text(
+                f"😔 Помилка: <code>{html.escape(str(e))}</code>", parse_mode="HTML"
+            )

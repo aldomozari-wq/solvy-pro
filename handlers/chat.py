@@ -1,6 +1,13 @@
 import asyncio
 import json
 import html
+import re
+
+_PHONE_RE = re.compile(r'\+?\d[\d\s\(\)\-]{6,14}\d')
+
+def _extract_phones(text: str) -> list:
+    found = _PHONE_RE.findall(text)
+    return list(dict.fromkeys(p for p in found if len(re.sub(r'\D', '', p)) >= 9))
 
 import anthropic
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
@@ -294,6 +301,21 @@ async def handle_message(update: Update, context):
         context.user_data.pop("photo_pending", None)
         await status_msg.delete()
         await update.effective_message.reply_photo(photo=result_url, caption="✅ Готово!")
+        return
+
+    # Bulk пошук по декількох номерах
+    bulk_phones = _extract_phones(text) if text else []
+    if len(bulk_phones) >= 2:
+        context.user_data["bulk_phones"] = bulk_phones
+        phones_list = "\n".join(bulk_phones)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎙 Шукати записи", callback_data="bulk_recs:go"),
+        ]])
+        await update.effective_message.reply_text(
+            f"Знайдено {len(bulk_phones)} номерів:\n<code>{html.escape(phones_list)}</code>\n\nЩо робимо?",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
         return
 
     # Обычный чат с Claude
