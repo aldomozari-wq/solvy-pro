@@ -2,8 +2,7 @@ import os
 import re
 from urllib.parse import urlsplit, urlunsplit
 
-import aiohttp
-from yarl import URL
+import httpx
 
 COPERATO_PROXY = os.getenv("COPERATO_PROXY", "")
 
@@ -22,15 +21,12 @@ def _normalize_url(url: str) -> str:
 async def download_recording(url: str) -> tuple[int, bytes]:
     """Скачать запись с Coperato через SOCKS5 прокси (если задан COPERATO_PROXY)."""
     normalized = _normalize_url(url)
-    print(f"[coperato] normalized={normalized!r}")
-    parsed = URL(normalized, encoded=True)
+    print(f"[coperato] download normalized={normalized!r}")
 
     kwargs = {}
     if COPERATO_PROXY:
-        from aiohttp_socks import ProxyConnector
-        connector = ProxyConnector.from_url(COPERATO_PROXY)
-        kwargs["connector"] = connector
+        kwargs["proxies"] = COPERATO_PROXY
 
-    async with aiohttp.ClientSession(**kwargs) as session:
-        async with session.get(parsed) as resp:
-            return resp.status, await resp.read()
+    async with httpx.AsyncClient(**kwargs, follow_redirects=True) as client:
+        resp = await client.get(normalized)
+        return resp.status_code, resp.content

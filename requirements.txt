@@ -5,6 +5,8 @@ fastapi
 uvicorn[standard]
 aiohttp
 aiohttp-socks
+httpx[socks]
+socksio
 fal-client
 psycopg2-binary
 python-dotenv
