@@ -819,9 +819,21 @@ async def debug_crec_url_command(update: Update, context):
         except Exception as e:
             return f"❌ {label}: {str(e)[:200]}"
 
+    def _test_proxy_alive(enc):
+        try:
+            r = _requests.get("https://api.ipify.org", proxies={"http": enc, "https": enc}, timeout=10)
+            return f"✅ Проксі живий, вихідний IP: {r.text.strip()}"
+        except Exception as e:
+            return f"❌ Проксі недоступний: {str(e)[:200]}"
+
     loop = asyncio.get_event_loop()
+    lines = []
+    if COPERATO_PROXY:
+        enc = _encode_proxy_url(COPERATO_PROXY)
+        proxy_alive = await loop.run_in_executor(None, _test_proxy_alive, enc)
+        lines.append(proxy_alive)
     direct = await loop.run_in_executor(None, _test, "Напряму", {})
-    lines = [direct]
+    lines.append(direct)
     if COPERATO_PROXY:
         enc = _encode_proxy_url(COPERATO_PROXY)
         via_proxy = await loop.run_in_executor(None, _test, "Через проксі", {"http": enc, "https": enc})
