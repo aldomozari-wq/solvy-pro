@@ -472,11 +472,13 @@ async def handle_stats_callback(update: Update, context):
             await context.bot.send_message(chat_id=query.message.chat_id, text="😔 URL запису не знайдено, спробуй /crec знову")
             return
         try:
+            print(f"[DEBUG] coperato download url={audio_url}")
             status_code, audio_bytes = await download_coperato_recording(audio_url)
             if status_code != 200 or len(audio_bytes) < 100:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"😔 Coperato повернув HTTP {status_code} ({len(audio_bytes)} байт)",
+                    text=f"😔 Coperato повернув HTTP {status_code} ({len(audio_bytes)} байт)\n<code>{html.escape(audio_url)}</code>",
+                    parse_mode="HTML",
                 )
                 return
             await context.bot.send_audio(
@@ -486,12 +488,13 @@ async def handle_stats_callback(update: Update, context):
                 caption="🎙️ Запис дзвінка (Coperato)",
             )
         except Exception as e:
-            print(f"[ERROR] coperato download={e}")
+            print(f"[ERROR] coperato download={e} url={audio_url}")
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=f"😔 Помилка завантаження: <code>{html.escape(str(e))}</code>",
+                text=f"😔 Помилка: <code>{html.escape(str(e))}</code>\nURL: <code>{html.escape(audio_url)}</code>",
                 parse_mode="HTML",
             )
+            return
 
     elif query.data.startswith("ctr_rec:"):
         idx = query.data.split(":", 1)[1]
