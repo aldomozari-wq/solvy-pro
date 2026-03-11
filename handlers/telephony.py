@@ -815,16 +815,16 @@ async def debug_crec_url_command(update: Update, context):
     def _test(label, proxies):
         try:
             r = _requests.get(norm_url, proxies=proxies, allow_redirects=True, timeout=10)
-            return f"✅ {label}: HTTP {r.status_code}, {len(r.content)} байт, {r.headers.get('content-type','?')}"
+            return f"✅ {label}: HTTP {r.status_code}, {len(r.content)} байт, {html.escape(r.headers.get('content-type','?'))}"
         except Exception as e:
-            return f"❌ {label}: {str(e)[:200]}"
+            return f"❌ {label}: {html.escape(str(e)[:300])}"
 
     def _test_proxy_alive(enc):
         try:
             r = _requests.get("https://api.ipify.org", proxies={"http": enc, "https": enc}, timeout=10)
             return f"✅ Проксі живий, вихідний IP: {r.text.strip()}"
         except Exception as e:
-            return f"❌ Проксі недоступний: {str(e)[:200]}"
+            return f"❌ Проксі недоступний: {html.escape(str(e)[:300])}"
 
     loop = asyncio.get_event_loop()
     lines = []
