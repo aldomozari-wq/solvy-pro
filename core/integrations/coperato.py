@@ -2,6 +2,7 @@ import os
 import re
 
 import aiohttp
+from yarl import URL
 
 COPERATO_PROXY = os.getenv("COPERATO_PROXY", "")
 
@@ -19,6 +20,7 @@ async def download_recording(url: str) -> tuple[int, bytes]:
         connector = ProxyConnector.from_url(COPERATO_PROXY)
         kwargs["connector"] = connector
 
+    parsed = URL(_normalize_url(url), encoded=True)
     async with aiohttp.ClientSession(**kwargs) as session:
-        async with session.get(_normalize_url(url)) as resp:
+        async with session.get(parsed) as resp:
             return resp.status, await resp.read()
