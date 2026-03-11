@@ -1,8 +1,14 @@
 import os
+import re
 
 import aiohttp
 
 COPERATO_PROXY = os.getenv("COPERATO_PROXY", "")
+
+
+def _normalize_url(url: str) -> str:
+    """Убрать лишние слеши в пути (https:// не трогать)."""
+    return re.sub(r'(?<!:)/{2,}', '/', url)
 
 
 async def download_recording(url: str) -> tuple[int, bytes]:
@@ -14,5 +20,5 @@ async def download_recording(url: str) -> tuple[int, bytes]:
         kwargs["connector"] = connector
 
     async with aiohttp.ClientSession(**kwargs) as session:
-        async with session.get(url) as resp:
+        async with session.get(_normalize_url(url)) as resp:
             return resp.status, await resp.read()

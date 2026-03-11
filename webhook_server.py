@@ -135,37 +135,6 @@ async def webhook_koperto(request: Request, secret: str = ""):
         except Exception as e:
             logger.error(f"[webhook/koperto] save_call error: {e}")
 
-        callerid    = data.get("callerid") or data.get("caller_id") or "—"
-        destination = data.get("destination") or data.get("called_id") or "—"
-        agent_name  = data.get("agentName") or data.get("agent") or "—"
-        duration    = data.get("duration") or ""
-        recording   = data.get("recordingFile") or ""
-        call_type   = (data.get("type") or "").lower()
-        dur_str     = _fmt_dur(duration) if duration else "—"
-
-        if "incoming" in call_type:
-            msg = (
-                f"📋 <b>Coperato: Вхідний завершено</b>\n"
-                f"Від: {_fmt_phone(callerid)}\n"
-                f"Агент: {agent_name}\n"
-                f"Тривалість: {dur_str}"
-            )
-        else:
-            msg = (
-                f"📋 <b>Coperato: Вихідний завершено</b>\n"
-                f"До: {_fmt_phone(destination)}\n"
-                f"Агент: {agent_name}\n"
-                f"Тривалість: {dur_str}"
-            )
-
-        keyboard = None
-        if recording:
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("▶️ Запис", url=recording)
-            ]])
-
-        asyncio.create_task(notify(msg, reply_markup=keyboard))
-
     return {"status": "ok"}
 
 
