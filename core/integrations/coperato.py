@@ -44,7 +44,7 @@ def _sync_download(url: str) -> tuple[int, bytes]:
     if COPERATO_PROXY:
         encoded = _encode_proxy_url(COPERATO_PROXY)
         proxies = {"http": encoded, "https": encoded}
-    resp = requests.get(url, proxies=proxies, allow_redirects=True, timeout=60)
+    resp = requests.get(url, proxies=proxies, allow_redirects=True, timeout=15)
     return resp.status_code, resp.content
 
 
