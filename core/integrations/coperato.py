@@ -25,7 +25,7 @@ async def download_recording(url: str) -> tuple[int, bytes]:
 
     kwargs = {}
     if COPERATO_PROXY:
-        kwargs["proxies"] = COPERATO_PROXY
+        kwargs["proxy"] = COPERATO_PROXY
 
     async with httpx.AsyncClient(**kwargs, follow_redirects=True) as client:
         resp = await client.get(normalized)
