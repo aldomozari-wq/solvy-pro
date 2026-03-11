@@ -20,7 +20,9 @@ async def download_recording(url: str) -> tuple[int, bytes]:
         connector = ProxyConnector.from_url(COPERATO_PROXY)
         kwargs["connector"] = connector
 
-    parsed = URL(_normalize_url(url), encoded=True)
+    normalized = _normalize_url(url.strip())
+    print(f"[coperato] download url={normalized!r}")
+    parsed = URL(normalized, encoded=True)
     async with aiohttp.ClientSession(**kwargs) as session:
         async with session.get(parsed) as resp:
             return resp.status, await resp.read()
