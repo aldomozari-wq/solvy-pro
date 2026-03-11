@@ -794,6 +794,41 @@ async def debug_coperato_command(update: Update, context):
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def debug_crec_url_command(update: Update, context):
+    """/debug_crec_url <url> — тест скачування URL напряму і через проксі"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Використання: /debug_crec_url &lt;url&gt;", parse_mode="HTML")
+        return
+
+    from core.integrations.coperato import _normalize_url, _encode_proxy_url, COPERATO_PROXY
+    import requests as _requests
+
+    raw_url = context.args[0]
+    norm_url = _normalize_url(raw_url)
+    await update.effective_message.reply_text(
+        f"🔍 Тестую URL:\n<code>{html.escape(norm_url)}</code>\nПроксі: <code>{html.escape(COPERATO_PROXY or 'немає')}</code>",
+        parse_mode="HTML",
+    )
+
+    def _test(label, proxies):
+        try:
+            r = _requests.get(norm_url, proxies=proxies, allow_redirects=True, timeout=10)
+            return f"✅ {label}: HTTP {r.status_code}, {len(r.content)} байт, {r.headers.get('content-type','?')}"
+        except Exception as e:
+            return f"❌ {label}: {str(e)[:200]}"
+
+    loop = asyncio.get_event_loop()
+    direct = await loop.run_in_executor(None, _test, "Напряму", {})
+    lines = [direct]
+    if COPERATO_PROXY:
+        enc = _encode_proxy_url(COPERATO_PROXY)
+        via_proxy = await loop.run_in_executor(None, _test, "Через проксі", {"http": enc, "https": enc})
+        lines.append(via_proxy)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 # ──────────────────────────────────────────────
 # CrocoCalls
 # ──────────────────────────────────────────────

@@ -10,5 +10,5 @@ from .telephony import (
     stats_command, vstats_command, cstats_command, kstats_command,
     handle_stats_callback, handle_bulk_callback,
     debug_pbx_command, debug_voiso_command, debug_vrec_command, debug_coperato_command,
-    debug_croco_command,
+    debug_croco_command, debug_crec_url_command,
 )

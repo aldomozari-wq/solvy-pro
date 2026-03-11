@@ -19,7 +19,7 @@ from handlers import (
     stats_command, vstats_command, cstats_command, kstats_command,
     handle_stats_callback, handle_bulk_callback,
     debug_pbx_command, debug_voiso_command, debug_vrec_command, debug_coperato_command,
-    debug_croco_command,
+    debug_croco_command, debug_crec_url_command,
 )
 from webhook_server import app as webhook_app
 
@@ -53,6 +53,7 @@ def build_bot_app():
     app.add_handler(CommandHandler("kstats",          kstats_command))
     app.add_handler(CommandHandler("krec",            krec_command))
     app.add_handler(CommandHandler("debug_croco",     debug_croco_command))
+    app.add_handler(CommandHandler("debug_crec_url",  debug_crec_url_command))
     app.add_handler(CommandHandler("stats",           stats_command))
     app.add_handler(CommandHandler("vstats",          vstats_command))
     app.add_handler(CommandHandler("cstats",          cstats_command))
