@@ -34,7 +34,9 @@ def _encode_proxy_url(proxy_url: str) -> str:
         else:
             username = userinfo[:colon_pos]
             password = userinfo[colon_pos + 1:]
-        return f"{scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{hostport}"
+        # Force socks5h so the proxy resolves DNS (not Railway)
+        out_scheme = "socks5h" if scheme in ("socks5", "socks5h") else scheme
+        return f"{out_scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{hostport}"
     except Exception:
         return proxy_url
 
